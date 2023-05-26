@@ -27,8 +27,8 @@ sam_predictor = SamPredictor(sam)
 
 
 # Predict classes and hyper-param for GroundingDINO
-SOURCE_IMAGE_PATH = "./assets/demo2.jpg"
-CLASSES = ["The running dog"]
+SOURCE_IMAGE_PATH = "./outputs/raw_image.jpg"
+CLASSES = [""]
 BOX_THRESHOLD = 0.25
 TEXT_THRESHOLD = 0.25
 NMS_THRESHOLD = 0.8
@@ -93,14 +93,14 @@ detections.mask = segment(
 )
 
 # annotate image with detections
-box_annotator = sv.BoxAnnotator()
+# box_annotator = sv.BoxAnnotator()
 mask_annotator = sv.MaskAnnotator()
 labels = [
     f"{CLASSES[class_id]} {confidence:0.2f}" 
     for _, _, confidence, class_id, _ 
     in detections]
 annotated_image = mask_annotator.annotate(scene=image.copy(), detections=detections)
-annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
+# annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
 
 # save the annotated grounded-sam image
 cv2.imwrite("grounded_sam_annotated_image.jpg", annotated_image)

@@ -8,6 +8,7 @@ import torch
 import torchvision
 from PIL import Image, ImageDraw, ImageFont
 import nltk
+import uuid
 
 # Grounding DINO
 import GroundingDINO.groundingdino.datasets.transforms as T
@@ -36,6 +37,23 @@ import torchvision.transforms as TS
 def load_image(image_path):
     # load image
     image_pil = Image.open(image_path).convert("RGB")  # load image
+
+    transform = T.Compose(
+        [
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    )
+    image, _ = transform(image_pil, None)  # 3, h, w
+    return image_pil, image
+
+def load_np_image(image_path):
+    # load image
+    if isinstance(image_path, np.ndarray):
+        image_pil = Image.fromarray(image_path.astype(np.uint8))
+    else:
+        image_pil = Image.open(image_path)
 
     transform = T.Compose(
         [
@@ -170,7 +188,7 @@ def show_box(box, ax, label):
     ax.text(x0, y0, label)
 
 
-def save_mask_data(output_dir, caption, mask_list, box_list, label_list):
+def save_mask_data(output_dir, mask_list, box_list, label_list, caption):
     value = 0  # 0 for background
 
     mask_img = torch.zeros(mask_list.shape[-2:])
@@ -179,27 +197,31 @@ def save_mask_data(output_dir, caption, mask_list, box_list, label_list):
     plt.figure(figsize=(10, 10))
     plt.imshow(mask_img.numpy())
     plt.axis('off')
-    plt.savefig(os.path.join(output_dir, 'mask.jpg'), bbox_inches="tight", dpi=300, pad_inches=0.0)
+    u = uuid.uuid1()
+    img_name = 'mask_%s.jpg' % (u)
+    path = os.path.join(output_dir, img_name)
+    plt.savefig(path, bbox_inches="tight", dpi=300, pad_inches=0.0)
 
-    json_data = {
-        'caption': caption,
-        'mask':[{
-            'value': value,
-            'label': 'background'
-        }]
-    }
-    for label, box in zip(label_list, box_list):
-        value += 1
-        name, logit = label.split('(')
-        logit = logit[:-1] # the last is ')'
-        json_data['mask'].append({
-            'value': value,
-            'label': name,
-            'logit': float(logit),
-            'box': box.numpy().tolist(),
-        })
-    with open(os.path.join(output_dir, 'label.json'), 'w') as f:
-        json.dump(json_data, f)
+    # json_data = {
+    #     'caption': caption,
+    #     'mask':[{
+    #         'value': value,
+    #         'label': 'background'
+    #     }]
+    # }
+    # for label, box in zip(label_list, box_list):
+    #     value += 1
+    #     name, logit = label.split('(')
+    #     logit = logit[:-1] # the last is ')'
+    #     json_data['mask'].append({
+    #         'value': value,
+    #         'label': name,
+    #         'logit': float(logit),
+    #         'box': box.numpy().tolist(),
+    #     })
+    # with open(os.path.join(output_dir, 'label.json'), 'w') as f:
+    #     json.dump(json_data, f)
+    return path
     
 
 if __name__ == "__main__":
@@ -351,4 +373,364 @@ if __name__ == "__main__":
         bbox_inches="tight", dpi=300, pad_inches=0.0
     )
 
-    save_mask_data(output_dir, caption, masks, boxes_filt, pred_phrases)
+    save_mask_data(output_dir, masks, boxes_filt, pred_phrases, caption)
+
+
+def generate_fn(input_image):
+    parser = argparse.ArgumentParser("Grounded-Segment-Anything Demo", add_help=True)
+    parser.add_argument("--config", type=str, default='GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', help="path to config file")
+    parser.add_argument(
+        "--tag2text_checkpoint", type=str, default='Tag2Text/tag2text_swin_14m.pth', help="path to checkpoint file"
+    )
+    parser.add_argument(
+        "--grounded_checkpoint", type=str, default='groundingdino_swint_ogc.pth', help="path to checkpoint file"
+    )
+    parser.add_argument(
+        "--sam_checkpoint", type=str, default='sam_vit_h_4b8939.pth', help="path to checkpoint file"
+    )
+    # parser.add_argument("--input_image", type=str, required=True, help="path to image file")
+    parser.add_argument("--split", default=",", type=str, help="split for text prompt")
+    parser.add_argument("--openai_key", type=str, help="key for chatgpt")
+    parser.add_argument("--openai_proxy", default=None, type=str, help="proxy for chatgpt")
+    parser.add_argument(
+        "--output_dir", "-o", type=str, default="outputs", help="output directory"
+    )
+
+    parser.add_argument("--box_threshold", type=float, default=0.25, help="box threshold")
+    parser.add_argument("--text_threshold", type=float, default=0.2, help="text threshold")
+    parser.add_argument("--iou_threshold", type=float, default=0.5, help="iou threshold")
+
+    parser.add_argument("--device", type=str, default="cpu", help="running on cpu only!, default=False")
+    args = parser.parse_args()
+
+    # cfg
+    config_file = args.config  # change the path of the model config file
+    tag2text_checkpoint = args.tag2text_checkpoint  # change the path of the model
+    grounded_checkpoint = args.grounded_checkpoint  # change the path of the model
+    sam_checkpoint = args.sam_checkpoint
+    image_path = input_image
+    split = args.split
+    openai_key = args.openai_key
+    openai_proxy = args.openai_proxy
+    output_dir = args.output_dir
+    box_threshold = args.box_threshold
+    text_threshold = args.text_threshold
+    iou_threshold = args.iou_threshold
+    device = args.device
+    
+    # ChatGPT or nltk is required when using captions
+    # openai.api_key = openai_key
+    # if openai_proxy:
+        # openai.proxy = {"http": openai_proxy, "https": openai_proxy}
+
+    # make dir
+    os.makedirs(output_dir, exist_ok=True)
+    # load image
+    image_pil, image = load_np_image(image_path)
+    # load model
+    model = load_model(config_file, grounded_checkpoint, device=device)
+
+    # visualize raw image
+    image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
+
+    # initialize Tag2Text
+    normalize = TS.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    transform = TS.Compose([
+                    TS.Resize((384, 384)),
+                    TS.ToTensor(), normalize
+                ])
+    
+    # filter out attributes and action categories which are difficult to grounding
+    delete_tag_index = []
+    for i in range(3012, 3429):
+        delete_tag_index.append(i)
+
+    specified_tags='None'
+    # load model
+    tag2text_model = tag2text.tag2text_caption(pretrained=tag2text_checkpoint,
+                                        image_size=384,
+                                        vit='swin_b',
+                                        delete_tag_index=delete_tag_index)
+    # threshold for tagging
+    # we reduce the threshold to obtain more tags
+    tag2text_model.threshold = 0.64 
+    tag2text_model.eval()
+
+    tag2text_model = tag2text_model.to(device)
+    raw_image = image_pil.resize(
+                    (384, 384))
+    raw_image  = transform(raw_image).unsqueeze(0).to(device)
+
+    res = inference.inference(raw_image , tag2text_model, specified_tags)
+
+    # Currently ", " is better for detecting single tags
+    # while ". " is a little worse in some case
+    text_prompt=res[0].replace(' |', ',')
+    caption=res[2]
+
+    print(f"Caption: {caption}")
+    print(f"Tags: {text_prompt}")
+
+    # run grounding dino model
+    boxes_filt, scores, pred_phrases = get_grounding_output(
+        model, image, text_prompt, box_threshold, text_threshold, device=device
+    )
+
+    # initialize SAM
+    predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint).to(device))
+    # image = cv2.imread(image_path)
+    image = cv2.cvtColor(image_path, cv2.COLOR_BGR2RGB)
+    predictor.set_image(image)
+
+    size = image_pil.size
+    H, W = size[1], size[0]
+    for i in range(boxes_filt.size(0)):
+        boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
+        boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
+        boxes_filt[i][2:] += boxes_filt[i][:2]
+
+    boxes_filt = boxes_filt.cpu()
+    # use NMS to handle overlapped boxes
+    print(f"Before NMS: {boxes_filt.shape[0]} boxes")
+    nms_idx = torchvision.ops.nms(boxes_filt, scores, iou_threshold).numpy().tolist()
+    boxes_filt = boxes_filt[nms_idx]
+    pred_phrases = [pred_phrases[idx] for idx in nms_idx]
+    print(f"After NMS: {boxes_filt.shape[0]} boxes")
+    # caption = check_caption(caption, pred_phrases)
+    print(f"Revise caption with number: {caption}")
+
+    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
+
+    masks, _, _ = predictor.predict_torch(
+        point_coords = None,
+        point_labels = None,
+        boxes = transformed_boxes.to(device),
+        multimask_output = False,
+    )
+    
+    # draw output image
+    plt.figure(figsize=(10, 10))
+    plt.imshow(image)
+    for mask in masks:
+        show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
+    for box, label in zip(boxes_filt, pred_phrases):
+        show_box(box.numpy(), plt.gca(), label)
+
+    # plt.title('Tag2Text-Captioning: ' + caption + '\n' + 'Tag2Text-Tagging' + text_prompt + '\n')
+    # plt.axis('off')
+    # plt.savefig(
+    #     os.path.join(output_dir, "automatic_label_output.jpg"), 
+    #     bbox_inches="tight", dpi=300, pad_inches=0.0
+    # )
+
+    path = save_mask_data(output_dir, masks, boxes_filt, pred_phrases, caption)
+    return path, caption, text_prompt
+
+def tag_fn(input_image):
+    parser = argparse.ArgumentParser("Grounded-Segment-Anything Demo", add_help=True)
+    parser.add_argument("--config", type=str, default='GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', help="path to config file")
+    parser.add_argument(
+        "--tag2text_checkpoint", type=str, default='Tag2Text/tag2text_swin_14m.pth', help="path to checkpoint file"
+    )
+    parser.add_argument(
+        "--grounded_checkpoint", type=str, default='groundingdino_swint_ogc.pth', help="path to checkpoint file"
+    )
+    parser.add_argument(
+        "--sam_checkpoint", type=str, default='sam_vit_h_4b8939.pth', help="path to checkpoint file"
+    )
+    # parser.add_argument("--input_image", type=str, required=True, help="path to image file")
+    parser.add_argument("--split", default=",", type=str, help="split for text prompt")
+    parser.add_argument("--openai_key", type=str, help="key for chatgpt")
+    parser.add_argument("--openai_proxy", default=None, type=str, help="proxy for chatgpt")
+    parser.add_argument(
+        "--output_dir", "-o", type=str, default="outputs", help="output directory"
+    )
+
+    parser.add_argument("--box_threshold", type=float, default=0.25, help="box threshold")
+    parser.add_argument("--text_threshold", type=float, default=0.2, help="text threshold")
+    parser.add_argument("--iou_threshold", type=float, default=0.5, help="iou threshold")
+
+    parser.add_argument("--device", type=str, default="cpu", help="running on cpu only!, default=False")
+    args = parser.parse_args()
+
+    # cfg
+    config_file = args.config  # change the path of the model config file
+    tag2text_checkpoint = args.tag2text_checkpoint  # change the path of the model
+    grounded_checkpoint = args.grounded_checkpoint  # change the path of the model
+    sam_checkpoint = args.sam_checkpoint
+    image_path = input_image
+    split = args.split
+    openai_key = args.openai_key
+    openai_proxy = args.openai_proxy
+    output_dir = args.output_dir
+    box_threshold = args.box_threshold
+    text_threshold = args.text_threshold
+    iou_threshold = args.iou_threshold
+    device = args.device
+    
+    # ChatGPT or nltk is required when using captions
+    # openai.api_key = openai_key
+    # if openai_proxy:
+        # openai.proxy = {"http": openai_proxy, "https": openai_proxy}
+
+    # make dir
+    os.makedirs(output_dir, exist_ok=True)
+    # load image
+    image_pil, image = load_np_image(image_path)
+    # load model
+    model = load_model(config_file, grounded_checkpoint, device=device)
+
+    # visualize raw image
+    image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
+
+    # initialize Tag2Text
+    normalize = TS.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    transform = TS.Compose([
+                    TS.Resize((384, 384)),
+                    TS.ToTensor(), normalize
+                ])
+    
+    # filter out attributes and action categories which are difficult to grounding
+    delete_tag_index = []
+    for i in range(3012, 3429):
+        delete_tag_index.append(i)
+
+    specified_tags='None'
+    # load model
+    tag2text_model = tag2text.tag2text_caption(pretrained=tag2text_checkpoint,
+                                        image_size=384,
+                                        vit='swin_b',
+                                        delete_tag_index=delete_tag_index)
+    # threshold for tagging
+    # we reduce the threshold to obtain more tags
+    tag2text_model.threshold = 0.64 
+    tag2text_model.eval()
+
+    tag2text_model = tag2text_model.to(device)
+    raw_image = image_pil.resize(
+                    (384, 384))
+    raw_image  = transform(raw_image).unsqueeze(0).to(device)
+
+    res = inference.inference(raw_image , tag2text_model, specified_tags)
+
+    # Currently ", " is better for detecting single tags
+    # while ". " is a little worse in some case
+    text_prompt=res[0].replace(' |', ',')
+    caption=res[2]
+    return text_prompt, caption
+
+def seg_fn(input_image):
+    parser = argparse.ArgumentParser("Grounded-Segment-Anything Demo", add_help=True)
+    parser.add_argument("--config", type=str, default='GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py', help="path to config file")
+    parser.add_argument(
+        "--tag2text_checkpoint", type=str, default='Tag2Text/tag2text_swin_14m.pth', help="path to checkpoint file"
+    )
+    parser.add_argument(
+        "--grounded_checkpoint", type=str, default='groundingdino_swint_ogc.pth', help="path to checkpoint file"
+    )
+    parser.add_argument(
+        "--sam_checkpoint", type=str, default='sam_vit_h_4b8939.pth', help="path to checkpoint file"
+    )
+    # parser.add_argument("--input_image", type=str, required=True, help="path to image file")
+    parser.add_argument("--split", default=",", type=str, help="split for text prompt")
+    parser.add_argument("--openai_key", type=str, help="key for chatgpt")
+    parser.add_argument("--openai_proxy", default=None, type=str, help="proxy for chatgpt")
+    parser.add_argument(
+        "--output_dir", "-o", type=str, default="outputs", help="output directory"
+    )
+
+    parser.add_argument("--box_threshold", type=float, default=0.25, help="box threshold")
+    parser.add_argument("--text_threshold", type=float, default=0.2, help="text threshold")
+    parser.add_argument("--iou_threshold", type=float, default=0.5, help="iou threshold")
+
+    parser.add_argument("--device", type=str, default="cpu", help="running on cpu only!, default=False")
+    args = parser.parse_args()
+
+    # cfg
+    config_file = args.config  # change the path of the model config file
+    tag2text_checkpoint = args.tag2text_checkpoint  # change the path of the model
+    grounded_checkpoint = args.grounded_checkpoint  # change the path of the model
+    sam_checkpoint = args.sam_checkpoint
+    image_path = input_image
+    split = args.split
+    openai_key = args.openai_key
+    openai_proxy = args.openai_proxy
+    output_dir = args.output_dir
+    box_threshold = args.box_threshold
+    text_threshold = args.text_threshold
+    iou_threshold = args.iou_threshold
+    device = args.device
+    
+    # ChatGPT or nltk is required when using captions
+    # openai.api_key = openai_key
+    # if openai_proxy:
+        # openai.proxy = {"http": openai_proxy, "https": openai_proxy}
+
+    # make dir
+    os.makedirs(output_dir, exist_ok=True)
+    # load image
+    image_pil, image = load_np_image(image_path)
+    # load model
+    model = load_model(config_file, grounded_checkpoint, device=device)
+
+    # visualize raw image
+    image_pil.save(os.path.join(output_dir, "raw_image.jpg"))
+
+
+
+    # run grounding dino model
+    boxes_filt, scores, pred_phrases = get_grounding_output(
+        model, image, text_prompt, box_threshold, text_threshold, device=device
+    )
+
+    # initialize SAM
+    predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint).to(device))
+    # image = cv2.imread(image_path)
+    image = cv2.cvtColor(image_path, cv2.COLOR_BGR2RGB)
+    predictor.set_image(image)
+
+    size = image_pil.size
+    H, W = size[1], size[0]
+    for i in range(boxes_filt.size(0)):
+        boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
+        boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
+        boxes_filt[i][2:] += boxes_filt[i][:2]
+
+    boxes_filt = boxes_filt.cpu()
+    # use NMS to handle overlapped boxes
+    print(f"Before NMS: {boxes_filt.shape[0]} boxes")
+    nms_idx = torchvision.ops.nms(boxes_filt, scores, iou_threshold).numpy().tolist()
+    boxes_filt = boxes_filt[nms_idx]
+    pred_phrases = [pred_phrases[idx] for idx in nms_idx]
+    print(f"After NMS: {boxes_filt.shape[0]} boxes")
+    # caption = check_caption(caption, pred_phrases)
+    print(f"Revise caption with number: {caption}")
+
+    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image.shape[:2]).to(device)
+
+    masks, _, _ = predictor.predict_torch(
+        point_coords = None,
+        point_labels = None,
+        boxes = transformed_boxes.to(device),
+        multimask_output = False,
+    )
+    
+    # draw output image
+    plt.figure(figsize=(10, 10))
+    plt.imshow(image)
+    for mask in masks:
+        show_mask(mask.cpu().numpy(), plt.gca(), random_color=True)
+    for box, label in zip(boxes_filt, pred_phrases):
+        show_box(box.numpy(), plt.gca(), label)
+
+    # plt.title('Tag2Text-Captioning: ' + caption + '\n' + 'Tag2Text-Tagging' + text_prompt + '\n')
+    # plt.axis('off')
+    # plt.savefig(
+    #     os.path.join(output_dir, "automatic_label_output.jpg"), 
+    #     bbox_inches="tight", dpi=300, pad_inches=0.0
+    # )
+
+    path = save_mask_data(output_dir, masks, boxes_filt, pred_phrases, caption)
+    return path
